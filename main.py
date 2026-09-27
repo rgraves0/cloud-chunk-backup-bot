@@ -2,6 +2,7 @@ import os
 import time
 import asyncio
 import logging
+import traceback
 from pathlib import Path
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
@@ -14,7 +15,7 @@ from telegram_uploader import TelegramUploader
 from ui_helper import make_progress_text
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG, # DEBUG level သို့ တင်ထားသည်
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
@@ -42,66 +43,81 @@ def get_control_keyboard():
     ])
 
 
-@bot.on_message(filters.private)
-async def private_message_handler(client: Client, message: Message):
-    if not message.text:
-        return
+# 1. RAW HANDLER: ဝင်လာသမျှ Telegram Update အားလုံးကို ဖမ်းယူ Log ထုတ်ပေးခြင်း
+@bot.on_raw_update()
+async def raw_update_logger(client: Client, update, users, chats):
+    logger.debug(f"[RAW UPDATE RECEIVED]: Type={type(update).__name__} | Update={update}")
 
-    text = message.text.strip()
-    sender_id = message.from_user.id if message.from_user else 0
-    logger.info(f"Incoming message from {sender_id}: {text}")
 
-    if text.startswith("/start"):
-        # ADMIN_ID စစ်ဆေးခြင်း
-        if ADMIN_ID and int(sender_id) != int(ADMIN_ID):
-            await message.reply_text(
-                f"⛔ **Access Denied!**\n\nYour Telegram ID: `{sender_id}`\nConfigured ADMIN_ID: `{ADMIN_ID}`"
+# 2. MESSAGE HANDLER: မက်ဆေ့ခ်ျအားလုံးကို Debug Log မှတ်ပြီး /start စစ်ဆေးခြင်း
+@bot.on_message()
+async def global_message_handler(client: Client, message: Message):
+    try:
+        sender_id = message.from_user.id if message.from_user else 0
+        sender_name = message.from_user.first_name if message.from_user else "Unknown"
+        text = message.text or ""
+        
+        logger.info(f"[INCOMING MSG] User: {sender_name} (ID: {sender_id}) | Chat: {message.chat.id} | Text: '{text}'")
+
+        if text.startswith("/start"):
+            logger.info(f"Processing /start command from {sender_id}. Checking against ADMIN_ID={ADMIN_ID}")
+            
+            # Admin ID စစ်ဆေးခြင်း
+            if ADMIN_ID and int(sender_id) != int(ADMIN_ID):
+                logger.warning(f"Unauthorized access attempt by ID: {sender_id}")
+                await message.reply_text(
+                    f"⛔ **Access Denied!**\n\nYour Telegram ID: `{sender_id}`\nConfigured ADMIN_ID: `{ADMIN_ID}`"
+                )
+                return
+
+            welcome_text = (
+                "🤖 **MegaUp to Telegram Backup Engine (2026 Ready)**\n\n"
+                "စနစ်သည် အဆင်သင့်ဖြစ်နေပါပြီ။ Auto Scan စနစ် (တစ်ရက် ၂ ကြိမ်) အပြင် "
+                "အောက်ပါခလုတ်ကို နှိပ်၍လည်း အချိန်မရွေး Sync စတင်နိုင်ပါသည်။"
             )
+            await message.reply_text(welcome_text, reply_markup=get_control_keyboard())
+            logger.info("Successfully sent welcome reply to admin.")
+
+    except Exception as e:
+        logger.error(f"Error inside global_message_handler: {e}\n{traceback.format_exc()}")
+
+
+@bot.on_callback_query()
+async def global_callback_handler(client: Client, query: CallbackQuery):
+    try:
+        sender_id = query.from_user.id if query.from_user else 0
+        data = query.data or ""
+        logger.info(f"[CALLBACK RECEIVED] User ID: {sender_id} | Data: '{data}'")
+
+        if ADMIN_ID and int(sender_id) != int(ADMIN_ID):
+            await query.answer("⛔ Access Denied", show_alert=True)
             return
 
-        welcome_text = (
-            "🤖 **MegaUp to Telegram Backup Engine (2026 Ready)**\n\n"
-            "စနစ်သည် အဆင်သင့်ဖြစ်နေပါပြီ။ Auto Scan စနစ် (တစ်ရက် ၂ ကြိမ်) အပြင် "
-            "အောက်ပါခလုတ်ကို နှိပ်၍လည်း အချိန်မရွေး Sync စတင်နိုင်ပါသည်။"
-        )
-        await message.reply_text(welcome_text, reply_markup=get_control_keyboard())
+        if data == "server_stats":
+            stats_text = make_progress_text(
+                file_name="System Idle",
+                user_name=query.from_user.first_name,
+                user_id=query.from_user.id,
+                current=0,
+                total=1,
+                speed=0,
+                elapsed=0,
+                status="Idle / Monitoring"
+            )
+            await query.message.edit_text(stats_text, reply_markup=get_control_keyboard())
+            await query.answer()
 
+        elif data == "manual_sync":
+            if TASK_LOCK.locked():
+                await query.answer("⚠️ Task တစ်ခု လုပ်ဆောင်နေဆဲဖြစ်ပါသည်။ ခေတ္တစောင့်ပါ။", show_alert=True)
+                return
 
-@bot.on_callback_query(filters.regex("^server_stats$"))
-async def stats_callback(client: Client, query: CallbackQuery):
-    sender_id = query.from_user.id if query.from_user else 0
-    if ADMIN_ID and int(sender_id) != int(ADMIN_ID):
-        await query.answer("⛔ Access Denied", show_alert=True)
-        return
+            await query.answer("🚀 Sync စတင်နေပါပြီ...")
+            status_msg = await query.message.reply_text("🔍 MegaUp မှ ဖိုင်များကို စစ်ဆေးနေပါသည်...")
+            asyncio.create_task(run_backup_pipeline(status_msg, query.from_user))
 
-    stats_text = make_progress_text(
-        file_name="System Idle",
-        user_name=query.from_user.first_name,
-        user_id=query.from_user.id,
-        current=0,
-        total=1,
-        speed=0,
-        elapsed=0,
-        status="Idle / Monitoring"
-    )
-    await query.message.edit_text(stats_text, reply_markup=get_control_keyboard())
-    await query.answer()
-
-
-@bot.on_callback_query(filters.regex("^manual_sync$"))
-async def manual_sync_callback(client: Client, query: CallbackQuery):
-    sender_id = query.from_user.id if query.from_user else 0
-    if ADMIN_ID and int(sender_id) != int(ADMIN_ID):
-        await query.answer("⛔ Access Denied", show_alert=True)
-        return
-
-    if TASK_LOCK.locked():
-        await query.answer("⚠️ Task တစ်ခု လုပ်ဆောင်နေဆဲဖြစ်ပါသည်။ ခေတ္တစောင့်ပါ။", show_alert=True)
-        return
-
-    await query.answer("🚀 Sync စတင်နေပါပြီ...")
-    status_msg = await query.message.reply_text("🔍 MegaUp မှ ဖိုင်များကို စစ်ဆေးနေပါသည်...")
-    asyncio.create_task(run_backup_pipeline(status_msg, query.from_user))
+    except Exception as e:
+        logger.error(f"Error inside global_callback_handler: {e}\n{traceback.format_exc()}")
 
 
 async def run_backup_pipeline(status_msg: Message = None, user=None):
@@ -207,9 +223,22 @@ async def scheduled_scan_job():
 
 async def main():
     async with bot:
-        logger.info("Telegram Bot connected successfully.")
+        me = await bot.get_me()
+        logger.info(f"Bot connected: @{me.username} (ID: {me.id})")
 
-        # Event Loop လည်ပတ်နေသည့် အတွင်း၌ Scheduler ကို စတင်ခြင်း
+        # Admin ထံသို့ စမ်းသပ်မက်ဆေ့ခ်ျ ပို့ကြည့်ခြင်း
+        if ADMIN_ID:
+            try:
+                await bot.send_message(
+                    chat_id=ADMIN_ID,
+                    text="🟢 **Bot Online!** Debug mode is active. Send `/start` now.",
+                    reply_markup=get_control_keyboard()
+                )
+                logger.info(f"Startup ping message sent successfully to ADMIN_ID: {ADMIN_ID}")
+            except Exception as e:
+                logger.error(f"Failed to send startup message to ADMIN_ID ({ADMIN_ID}): {e}")
+
+        # Scheduler စတင်ခြင်း
         hours = AUTO_SCAN_HOURS.split(",")
         for h in hours:
             if h.strip().isdigit():
@@ -217,8 +246,8 @@ async def main():
 
         scheduler.start()
         logger.info(f"Scheduler active for hours: {AUTO_SCAN_HOURS}")
-        logger.info("Bot is now listening for commands...")
 
+        # Dispatcher loop စောင့်ဆိုင်းခြင်း
         await idle()
 
 
