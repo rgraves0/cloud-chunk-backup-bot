@@ -5,7 +5,9 @@ import logging
 from pathlib import Path
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.raw.functions.messages import DeleteHistory
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import httpx
 
 from config import API_ID, API_HASH, BOT_TOKEN, ADMIN_ID, AUTO_SCAN_HOURS, TARGET_CHANNEL_ID
 from megaup import MegaUpClient
@@ -19,9 +21,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Session name အသစ်ပြောင်း၍ Telegram DC Sync state အသစ် ပြန်ယူစေခြင်း
 bot = Client(
-    "megaup_v2_session",
+    "megaup_backup_session",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN
@@ -43,12 +44,11 @@ def get_control_keyboard():
     ])
 
 
-# ChatGPT အကြံပြုချက်: filters.all ဖြင့် မက်ဆေ့ခ်ျအားလုံးကို အစိမ်းလိုက် ဖမ်းယူခြင်း
-@bot.on_message(filters.all)
+@bot.on_message()
 async def incoming_message_handler(client: Client, message: Message):
     sender_id = message.from_user.id if message.from_user else 0
     text = message.text or ""
-    logger.info(f"🔥 [MSG DETECTED] From: {sender_id} | Text: '{text}'")
+    logger.info(f"Incoming message from: {sender_id} | Text: '{text}'")
 
     if text.startswith("/start"):
         if ADMIN_ID and int(sender_id) != int(ADMIN_ID):
@@ -65,18 +65,26 @@ async def incoming_message_handler(client: Client, message: Message):
         await message.reply_text(welcome_text, reply_markup=get_control_keyboard())
 
 
+# Regex filter မသုံးဘဲ Callback Query အားလုံးကို အစိမ်းလိုက် ဖမ်းယူ၍ Log ထုတ်ခြင်း
 @bot.on_callback_query()
-async def incoming_callback_handler(client: Client, query: CallbackQuery):
+async def universal_callback_handler(client: Client, query: CallbackQuery):
     sender_id = query.from_user.id if query.from_user else 0
     data = query.data or ""
-    logger.info(f"🔥 [CALLBACK DETECTED] From: {sender_id} | Data: '{data}'")
+    
+    # ChatGPT အကြံပြုထားသော ပင်မ စစ်ဆေးချက် Log
+    logger.info(f"🔥 CALLBACK RECEIVED: {data} | From User ID: {sender_id}")
 
+    # Telegram client တွင် loading လည်ပြီး မရပ်မချင်း ဖြစ်မနေစေရန် answer အရင်ပေးခြင်း
+    await query.answer()
+
+    # ADMIN_ID စစ်ဆေးခြင်း
     if ADMIN_ID and int(sender_id) != int(ADMIN_ID):
+        logger.warning(f"Unauthorized callback attempt by: {sender_id}")
         await query.answer("⛔ Access Denied: Unauthorized User", show_alert=True)
         return
 
     if data == "server_stats":
-        await query.answer("📊 Fetching server stats...")
+        logger.info("Executing server_stats view...")
         stats_text = make_progress_text(
             file_name="System Idle",
             user_name=query.from_user.first_name,
@@ -90,14 +98,14 @@ async def incoming_callback_handler(client: Client, query: CallbackQuery):
         try:
             await query.message.edit_text(stats_text, reply_markup=get_control_keyboard())
         except Exception as edit_err:
-            logger.debug(f"Edit error on stats: {edit_err}")
+            logger.error(f"Failed to edit stats message: {edit_err}")
 
     elif data == "manual_sync":
+        logger.info("Executing manual_sync trigger...")
         if TASK_LOCK.locked():
             await query.answer("⚠️ Task တစ်ခု လုပ်ဆောင်နေဆဲဖြစ်ပါသည်။ ခေတ္တစောင့်ပါ။", show_alert=True)
             return
 
-        await query.answer("🚀 Sync စတင်နေပါပြီ...")
         status_msg = await query.message.reply_text("🔍 MegaUp မှ ဖိုင်များကို စစ်ဆေးနေပါသည်...")
         asyncio.create_task(run_backup_pipeline(status_msg, query.from_user))
 
@@ -203,7 +211,19 @@ async def scheduled_scan_job():
     await run_backup_pipeline()
 
 
+async def clear_telegram_webhook():
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=True"
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            res = await client.get(url)
+            logger.info(f"Webhook reset status: {res.json()}")
+    except Exception as e:
+        logger.warning(f"Failed to reset webhook: {e}")
+
+
 async def main():
+    await clear_telegram_webhook()
+
     async with bot:
         me = await bot.get_me()
         logger.info(f"Bot connected: @{me.username} (ID: {me.id})")
@@ -215,7 +235,7 @@ async def main():
 
         scheduler.start()
         logger.info(f"Scheduler active for hours: {AUTO_SCAN_HOURS}")
-        logger.info("Ready to receive messages and callbacks.")
+        logger.info("Bot is ready for commands and buttons.")
 
         await idle()
 
