@@ -12,7 +12,8 @@ class MegaUpClient:
         self.base_url = base_url.rstrip("/")
         self.keys = [k for k in [MEGAUP_KEY_1, MEGAUP_KEY_2] if k]
         self.current_key_index = 0
-        self.folder_name = MEGAUP_FOLDER_NAME
+        # S အကြီးဖြင့် Sync သတ်မှတ်ခြင်း သို့မဟုတ် .env တန်ဖိုးကို ယူခြင်း
+        self.folder_name = MEGAUP_FOLDER_NAME or "Sync"
         self.session_cookie = os.getenv("MEGAUP_COOKIE", "")
 
     @property
@@ -38,36 +39,65 @@ class MegaUpClient:
         return headers
 
     async def get_recent_completed_files(self) -> List[Dict]:
-        """ပြီးစီးပြီးသား ဖိုင်များကို စစ်ဆေးထုတ်ယူခြင်း"""
+        """Sync folder နှင့် ၎င်းအောက်ရှိ Subfolder/Album များထဲမှ ဖိုင်များကို ရှာဖွေထုတ်ယူခြင်း"""
         for _ in range(len(self.keys) or 1):
             async with httpx.AsyncClient(headers=self.get_headers(), timeout=30.0, follow_redirects=True) as client:
                 try:
                     if self.current_key:
-                        params = {}
-                        if self.folder_name:
-                            params["folder"] = self.folder_name
-                            
+                        # 1. ပထမဆုံး Folder အမည် (Sync) ဖြင့် စစ်ဆေးခြင်း
+                        params = {"folder": self.folder_name}
                         res = await client.get(f"{self.base_url}/files", params=params)
+                        logger.info(f"Checking MegaUp API for folder '{self.folder_name}' | Status: {res.status_code}")
+
                         if res.status_code == 200:
-                            data = res.json().get("data", [])
+                            json_res = res.json()
+                            raw_items = json_res.get("data") or json_res.get("files") or json_res.get("result") or []
+                            
                             valid_files = []
-                            for item in data:
-                                status = item.get("status", "").lower()
+                            for item in raw_items:
+                                # Subfolder ဖြစ်ပါက ထို Subfolder (Album) အောက်သို့ ဆက်လက်ဝင်ရောက်ရှာဖွေခြင်း
+                                if item.get("is_dir") or item.get("type") == "folder":
+                                    sub_folder_id = item.get("id")
+                                    sub_folder_name = item.get("name")
+                                    logger.info(f"Found Album Folder: {sub_folder_name} (ID: {sub_folder_id}). Scanning contents...")
+                                    
+                                    sub_res = await client.get(f"{self.base_url}/files", params={"folder_id": sub_folder_id})
+                                    if sub_res.status_code == 200:
+                                        sub_items = sub_res.json().get("data") or sub_res.json().get("files") or []
+                                        for s_item in sub_items:
+                                            f_status = str(s_item.get("status", "")).lower()
+                                            f_size = s_item.get("size", 0)
+                                            if f_status in ("completed", "ready", "active", "") and int(f_size) > 0:
+                                                valid_files.append({
+                                                    "id": str(s_item.get("id")),
+                                                    "name": s_item.get("name"),
+                                                    "album_name": sub_folder_name, # Album အမည်တွဲယူခြင်း
+                                                    "size": int(f_size),
+                                                    "download_url": s_item.get("download_url")
+                                                })
+                                    continue
+
+                                # Sync folder ထဲတွင် တိုက်ရိုက်ရှိနေသော ဖိုင်များ
+                                status = str(item.get("status", "")).lower()
                                 size = item.get("size", 0)
-                                if status in ("completed", "ready", "active", "") and size > 0:
+                                if status in ("completed", "ready", "active", "") and int(size) > 0:
                                     valid_files.append({
                                         "id": str(item.get("id")),
                                         "name": item.get("name"),
+                                        "album_name": self.folder_name,
                                         "size": int(size),
                                         "download_url": item.get("download_url")
                                     })
+                            
+                            logger.info(f"Total valid files found to sync: {len(valid_files)}")
                             return valid_files
+
                         elif res.status_code in (401, 429):
                             self.switch_key()
                             continue
 
-                    # Fallback (Cookie သို့မဟုတ် Free parsing)
-                    logger.info("Using MegaUp fallback file parser...")
+                    # Fallback (User Dashboard Parsing)
+                    logger.info("Using MegaUp dashboard fallback parser...")
                     res = await client.get("https://megaup.net/user/files")
                     if res.status_code == 200:
                         matches = re.findall(r'href="(https://megaup\.net/([a-zA-Z0-9]+)/([^"]+))"', res.text)
@@ -76,6 +106,7 @@ class MegaUpClient:
                             files.append({
                                 "id": fid,
                                 "name": fname,
+                                "album_name": self.folder_name,
                                 "size": 0,
                                 "download_url": full_url
                             })
