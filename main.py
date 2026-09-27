@@ -19,8 +19,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Session name အသစ်ပြောင်း၍ Telegram DC Sync state အသစ် ပြန်ယူစေခြင်း
 bot = Client(
-    "megaup_backup_session",
+    "megaup_v2_session",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN
@@ -42,14 +43,12 @@ def get_control_keyboard():
     ])
 
 
-@bot.on_message()
+# ChatGPT အကြံပြုချက်: filters.all ဖြင့် မက်ဆေ့ခ်ျအားလုံးကို အစိမ်းလိုက် ဖမ်းယူခြင်း
+@bot.on_message(filters.all)
 async def incoming_message_handler(client: Client, message: Message):
-    if not message.text:
-        return
-        
     sender_id = message.from_user.id if message.from_user else 0
-    text = message.text.strip()
-    logger.info(f"Incoming message from {sender_id}: '{text}'")
+    text = message.text or ""
+    logger.info(f"🔥 [MSG DETECTED] From: {sender_id} | Text: '{text}'")
 
     if text.startswith("/start"):
         if ADMIN_ID and int(sender_id) != int(ADMIN_ID):
@@ -70,7 +69,7 @@ async def incoming_message_handler(client: Client, message: Message):
 async def incoming_callback_handler(client: Client, query: CallbackQuery):
     sender_id = query.from_user.id if query.from_user else 0
     data = query.data or ""
-    logger.info(f"Button Clicked: '{data}' by User ID: {sender_id}")
+    logger.info(f"🔥 [CALLBACK DETECTED] From: {sender_id} | Data: '{data}'")
 
     if ADMIN_ID and int(sender_id) != int(ADMIN_ID):
         await query.answer("⛔ Access Denied: Unauthorized User", show_alert=True)
