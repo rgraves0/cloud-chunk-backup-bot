@@ -11,7 +11,7 @@ from config import API_ID, API_HASH, BOT_TOKEN, ADMIN_ID, AUTO_SCAN_HOURS, TARGE
 from megaup import MegaUpClient
 from file_manager import FileManager
 from telegram_uploader import TelegramUploader
-from ui_helper import make_progress_text, get_readable_size
+from ui_helper import make_progress_text
 
 logging.basicConfig(
     level=logging.INFO,
@@ -19,12 +19,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# in_memory=True ကို ဖြုတ်ထားသည် (DC auth key ကို cache သိမ်းပြီး reconnect မြန်စေရန်)
 bot = Client(
-    "megaup_backup_bot",
+    "megaup_backup_session",
     api_id=API_ID,
     api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-    in_memory=True
+    bot_token=BOT_TOKEN
 )
 
 megaup_client = MegaUpClient()
@@ -46,11 +46,14 @@ def get_control_keyboard():
 @bot.on_message(filters.command("start"))
 async def start_handler(client: Client, message: Message):
     sender_id = message.from_user.id if message.from_user else 0
-    logger.info(f"Received /start from User ID: {sender_id} (Configured ADMIN_ID: {ADMIN_ID})")
+    logger.info(f"Received /start from User ID: {sender_id}")
 
-    # ADMIN_ID သတ်မှတ်ထားပြီး မကိုက်ညီပါက Log တွင် ပြပေးမည်
+    # Admin filter
     if ADMIN_ID and int(sender_id) != int(ADMIN_ID):
-        await message.reply_text(f"⛔ Unauthorized: Your ID is `{sender_id}`. Please set ADMIN_ID={sender_id} in your environment variables.")
+        await message.reply_text(
+            f"⛔ Unauthorized Access!\nYour Telegram ID is: `{sender_id}`\n"
+            f"Please update ADMIN_ID in your config/env."
+        )
         return
 
     text = (
@@ -200,20 +203,21 @@ async def scheduled_scan_job():
 
 
 async def main():
-    await bot.start()
-    logger.info("Telegram Bot started successfully.")
+    async with bot:
+        logger.info("Telegram Bot started and listening for commands...")
 
-    hours = AUTO_SCAN_HOURS.split(",")
-    for h in hours:
-        if h.strip().isdigit():
-            scheduler.add_job(scheduled_scan_job, "cron", hour=int(h.strip()), minute=0)
+        # Scheduler စတင်ခြင်း
+        hours = AUTO_SCAN_HOURS.split(",")
+        for h in hours:
+            if h.strip().isdigit():
+                scheduler.add_job(scheduled_scan_job, "cron", hour=int(h.strip()), minute=0)
 
-    scheduler.start()
-    logger.info(f"Scheduler active for hours: {AUTO_SCAN_HOURS}")
+        scheduler.start()
+        logger.info(f"Scheduler active for hours: {AUTO_SCAN_HOURS}")
 
-    # Pyrogram idle() သုံး၍ Signal များကို ချောမွေ့စွာ စောင့်ဆိုင်းစေခြင်း
-    await idle()
-    await bot.stop()
+        # Connection ပုံမှန်နားထောင်နေစေရန် idle ဖြင့် ထိန်းထားခြင်း
+        await idle()
+
 
 if __name__ == "__main__":
-    bot.run(main())
+    asyncio.run(main())
