@@ -3,7 +3,7 @@ import time
 import asyncio
 import logging
 from pathlib import Path
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -42,28 +42,29 @@ def get_control_keyboard():
     ])
 
 
-@bot.on_message()
-async def all_incoming_logger(client: Client, message: Message):
-    # မက်ဆေ့ခ်ျအားလုံး ဝင်မဝင် စစ်ဆေးရန် (Debug အတွက်)
-    logger.info(f"Incoming message from ID: {message.from_user.id if message.from_user else 'Unknown'} | Text: {message.text}")
-    
-    if message.text and message.text.startswith("/start"):
-        sender_id = message.from_user.id if message.from_user else 0
-        
+@bot.on_message(filters.private)
+async def private_message_handler(client: Client, message: Message):
+    if not message.text:
+        return
+
+    text = message.text.strip()
+    sender_id = message.from_user.id if message.from_user else 0
+    logger.info(f"Incoming message from {sender_id}: {text}")
+
+    if text.startswith("/start"):
         # ADMIN_ID စစ်ဆေးခြင်း
         if ADMIN_ID and int(sender_id) != int(ADMIN_ID):
             await message.reply_text(
-                f"⛔ **Access Denied!**\n\nYour Telegram ID is: `{sender_id}`\n"
-                f"Configured ADMIN_ID is: `{ADMIN_ID}`"
+                f"⛔ **Access Denied!**\n\nYour Telegram ID: `{sender_id}`\nConfigured ADMIN_ID: `{ADMIN_ID}`"
             )
             return
 
-        text = (
+        welcome_text = (
             "🤖 **MegaUp to Telegram Backup Engine (2026 Ready)**\n\n"
             "စနစ်သည် အဆင်သင့်ဖြစ်နေပါပြီ။ Auto Scan စနစ် (တစ်ရက် ၂ ကြိမ်) အပြင် "
             "အောက်ပါခလုတ်ကို နှိပ်၍လည်း အချိန်မရွေး Sync စတင်နိုင်ပါသည်။"
         )
-        await message.reply_text(text, reply_markup=get_control_keyboard())
+        await message.reply_text(welcome_text, reply_markup=get_control_keyboard())
 
 
 @bot.on_callback_query(filters.regex("^server_stats$"))
@@ -204,16 +205,22 @@ async def scheduled_scan_job():
     await run_backup_pipeline()
 
 
+async def main():
+    async with bot:
+        logger.info("Telegram Bot connected successfully.")
+
+        # Event Loop လည်ပတ်နေသည့် အတွင်း၌ Scheduler ကို စတင်ခြင်း
+        hours = AUTO_SCAN_HOURS.split(",")
+        for h in hours:
+            if h.strip().isdigit():
+                scheduler.add_job(scheduled_scan_job, "cron", hour=int(h.strip()), minute=0)
+
+        scheduler.start()
+        logger.info(f"Scheduler active for hours: {AUTO_SCAN_HOURS}")
+        logger.info("Bot is now listening for commands...")
+
+        await idle()
+
+
 if __name__ == "__main__":
-    # Scheduler စတင်ခြင်း
-    hours = AUTO_SCAN_HOURS.split(",")
-    for h in hours:
-        if h.strip().isdigit():
-            scheduler.add_job(scheduled_scan_job, "cron", hour=int(h.strip()), minute=0)
-
-    scheduler.start()
-    logger.info(f"Scheduler active for hours: {AUTO_SCAN_HOURS}")
-
-    # Pyrogram native execution (Dispatcher ကို အပြည့်အဝ အသက်သွင်းသည်)
-    logger.info("Starting bot using native runner...")
-    bot.run()
+    asyncio.run(main())
