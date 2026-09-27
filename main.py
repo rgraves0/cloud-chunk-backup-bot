@@ -3,11 +3,9 @@ import time
 import asyncio
 import logging
 from pathlib import Path
-from pyrogram import Client, filters, idle
-from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.raw.functions.messages import DeleteHistory
+from pyrogram import Client, filters
+from pyrogram.types import Message
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-import httpx
 
 from config import API_ID, API_HASH, BOT_TOKEN, ADMIN_ID, AUTO_SCAN_HOURS, TARGET_CHANNEL_ID
 from megaup import MegaUpClient
@@ -22,7 +20,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 bot = Client(
-    "megaup_backup_session",
+    "megaup_v2_session",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN
@@ -37,77 +35,58 @@ TASK_LOCK = asyncio.Lock()
 PROCESSED_FILE_IDS = set()
 
 
-def get_control_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 Sync Now", callback_data="manual_sync")],
-        [InlineKeyboardButton("📊 Server Stats", callback_data="server_stats")]
-    ])
-
-
-@bot.on_message()
-async def incoming_message_handler(client: Client, message: Message):
+@bot.on_message(filters.command("start") & filters.private)
+async def start_handler(client: Client, message: Message):
     sender_id = message.from_user.id if message.from_user else 0
-    text = message.text or ""
-    logger.info(f"Incoming message from: {sender_id} | Text: '{text}'")
+    logger.info(f"Incoming /start from User ID: {sender_id}")
 
-    if text.startswith("/start"):
-        if ADMIN_ID and int(sender_id) != int(ADMIN_ID):
-            await message.reply_text(
-                f"⛔ **Access Denied!**\n\nYour Telegram ID: `{sender_id}`\nConfigured ADMIN_ID: `{ADMIN_ID}`"
-            )
-            return
-
-        welcome_text = (
-            "🤖 **MegaUp to Telegram Backup Engine (2026 Ready)**\n\n"
-            "စနစ်သည် အဆင်သင့်ဖြစ်နေပါပြီ။ Auto Scan စနစ် (တစ်ရက် ၂ ကြိမ်) အပြင် "
-            "အောက်ပါခလုတ်ကို နှိပ်၍လည်း အချိန်မရွေး Sync စတင်နိုင်ပါသည်။"
-        )
-        await message.reply_text(welcome_text, reply_markup=get_control_keyboard())
-
-
-# Regex filter မသုံးဘဲ Callback Query အားလုံးကို အစိမ်းလိုက် ဖမ်းယူ၍ Log ထုတ်ခြင်း
-@bot.on_callback_query()
-async def universal_callback_handler(client: Client, query: CallbackQuery):
-    sender_id = query.from_user.id if query.from_user else 0
-    data = query.data or ""
-    
-    # ChatGPT အကြံပြုထားသော ပင်မ စစ်ဆေးချက် Log
-    logger.info(f"🔥 CALLBACK RECEIVED: {data} | From User ID: {sender_id}")
-
-    # Telegram client တွင် loading လည်ပြီး မရပ်မချင်း ဖြစ်မနေစေရန် answer အရင်ပေးခြင်း
-    await query.answer()
-
-    # ADMIN_ID စစ်ဆေးခြင်း
     if ADMIN_ID and int(sender_id) != int(ADMIN_ID):
-        logger.warning(f"Unauthorized callback attempt by: {sender_id}")
-        await query.answer("⛔ Access Denied: Unauthorized User", show_alert=True)
+        await message.reply_text(
+            f"⛔ **Access Denied!**\n\nYour Telegram ID: `{sender_id}`\nConfigured ADMIN_ID: `{ADMIN_ID}`"
+        )
         return
 
-    if data == "server_stats":
-        logger.info("Executing server_stats view...")
-        stats_text = make_progress_text(
-            file_name="System Idle",
-            user_name=query.from_user.first_name,
-            user_id=query.from_user.id,
-            current=0,
-            total=1,
-            speed=0,
-            elapsed=0,
-            status="Idle / Monitoring"
-        )
-        try:
-            await query.message.edit_text(stats_text, reply_markup=get_control_keyboard())
-        except Exception as edit_err:
-            logger.error(f"Failed to edit stats message: {edit_err}")
+    text = (
+        "🤖 **MegaUp to Telegram Backup Engine (2026 Ready)**\n\n"
+        "စနစ်သည် အဆင်သင့်ဖြစ်နေပါပြီ။ Auto Scan စနစ် (တစ်ရက် ၂ ကြိမ်) အလိုအလျောက် လည်ပတ်နေပါသည်။\n\n"
+        "📌 **အသုံးပြုနိုင်သော Commands များ:**\n"
+        "• `/sync` — MegaUp မှ အသစ်တင်ထားသော ဖိုင်များကို ချက်ချင်း စတင် backup လုပ်မည်။\n"
+        "• `/stats` — Host Server ၏ CPU, RAM, Disk နှင့် Uptime စစ်ဆေးမည်။"
+    )
+    await message.reply_text(text)
 
-    elif data == "manual_sync":
-        logger.info("Executing manual_sync trigger...")
-        if TASK_LOCK.locked():
-            await query.answer("⚠️ Task တစ်ခု လုပ်ဆောင်နေဆဲဖြစ်ပါသည်။ ခေတ္တစောင့်ပါ။", show_alert=True)
-            return
 
-        status_msg = await query.message.reply_text("🔍 MegaUp မှ ဖိုင်များကို စစ်ဆေးနေပါသည်...")
-        asyncio.create_task(run_backup_pipeline(status_msg, query.from_user))
+@bot.on_message(filters.command("stats") & filters.private)
+async def stats_handler(client: Client, message: Message):
+    sender_id = message.from_user.id if message.from_user else 0
+    if ADMIN_ID and int(sender_id) != int(ADMIN_ID):
+        return
+
+    stats_text = make_progress_text(
+        file_name="System Idle",
+        user_name=message.from_user.first_name,
+        user_id=message.from_user.id,
+        current=0,
+        total=1,
+        speed=0,
+        elapsed=0,
+        status="Idle / Monitoring"
+    )
+    await message.reply_text(stats_text)
+
+
+@bot.on_message(filters.command("sync") & filters.private)
+async def sync_handler(client: Client, message: Message):
+    sender_id = message.from_user.id if message.from_user else 0
+    if ADMIN_ID and int(sender_id) != int(ADMIN_ID):
+        return
+
+    if TASK_LOCK.locked():
+        await message.reply_text("⚠️ Task တစ်ခု လုပ်ဆောင်နေဆဲဖြစ်ပါသည်။ ခေတ္တစောင့်ဆိုင်းပေးပါ။")
+        return
+
+    status_msg = await message.reply_text("🔍 MegaUp မှ ဖိုင်များကို စစ်ဆေးနေပါသည်...")
+    asyncio.create_task(run_backup_pipeline(status_msg, message.from_user))
 
 
 async def run_backup_pipeline(status_msg: Message = None, user=None):
@@ -198,12 +177,12 @@ async def run_backup_pipeline(status_msg: Message = None, user=None):
                     file_manager.cleanup_task_dir(task_dir)
 
             if status_msg:
-                await status_msg.edit_text("🎉 **Batch Backup ပြီးဆုံးပါပြီ။**", reply_markup=get_control_keyboard())
+                await status_msg.edit_text("🎉 **Batch Backup ပြီးဆုံးပါပြီ။**")
 
         except Exception as e:
             logger.exception(f"Pipeline error: {e}")
             if status_msg:
-                await status_msg.edit_text(f"❌ Error: {e}", reply_markup=get_control_keyboard())
+                await status_msg.edit_text(f"❌ Error: {e}")
 
 
 async def scheduled_scan_job():
@@ -211,34 +190,33 @@ async def scheduled_scan_job():
     await run_backup_pipeline()
 
 
-async def clear_telegram_webhook():
-    try:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=True"
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            res = await client.get(url)
-            logger.info(f"Webhook reset status: {res.json()}")
-    except Exception as e:
-        logger.warning(f"Failed to reset webhook: {e}")
+async def startup_routine():
+    """Bot စတင်တက်ချိန် background scheduler ကို configure လုပ်ခြင်း"""
+    await asyncio.sleep(2)
+    me = await bot.get_me()
+    logger.info(f"Bot connected: @{me.username} (ID: {me.id})")
 
+    hours = AUTO_SCAN_HOURS.split(",")
+    for h in hours:
+        if h.strip().isdigit():
+            scheduler.add_job(scheduled_scan_job, "cron", hour=int(h.strip()), minute=0)
 
-async def main():
-    await clear_telegram_webhook()
+    scheduler.start()
+    logger.info(f"Scheduler active for hours: {AUTO_SCAN_HOURS}")
 
-    async with bot:
-        me = await bot.get_me()
-        logger.info(f"Bot connected: @{me.username} (ID: {me.id})")
-
-        hours = AUTO_SCAN_HOURS.split(",")
-        for h in hours:
-            if h.strip().isdigit():
-                scheduler.add_job(scheduled_scan_job, "cron", hour=int(h.strip()), minute=0)
-
-        scheduler.start()
-        logger.info(f"Scheduler active for hours: {AUTO_SCAN_HOURS}")
-        logger.info("Bot is ready for commands and buttons.")
-
-        await idle()
+    if ADMIN_ID:
+        try:
+            await bot.send_message(
+                chat_id=int(ADMIN_ID),
+                text="🟢 **Bot Online!**\n\nCommand များ စတင်အသုံးပြုနိုင်ပါပြီ:\n• `/sync`\n• `/stats`"
+            )
+            logger.info("Startup notification delivered to Admin.")
+        except Exception as e:
+            logger.error(f"Cannot deliver message to ADMIN_ID {ADMIN_ID}: {e}")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    loop = asyncio.get_event_loop()
+    loop.create_task(startup_routine())
+    logger.info("Starting Pyrogram bot engine...")
+    bot.run()
