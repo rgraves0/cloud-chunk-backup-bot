@@ -3,7 +3,7 @@ import time
 import asyncio
 import logging
 from pathlib import Path
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -32,7 +32,6 @@ file_manager = FileManager()
 uploader = TelegramUploader(bot)
 scheduler = AsyncIOScheduler()
 
-# Processing Lock (အလုပ်နှစ်ခု ပြိုင်မလုပ်စေရန်)
 TASK_LOCK = asyncio.Lock()
 PROCESSED_FILE_IDS = set()
 
@@ -44,10 +43,14 @@ def get_control_keyboard():
     ])
 
 
-@bot.on_message(filters.command("start") & filters.private)
+@bot.on_message(filters.command("start"))
 async def start_handler(client: Client, message: Message):
-    if ADMIN_ID and message.from_user.id != ADMIN_ID:
-        await message.reply_text("⛔ ခွင့်ပြုချက်မရှိသော အသုံးပြုသူ ဖြစ်ပါသည်။")
+    sender_id = message.from_user.id if message.from_user else 0
+    logger.info(f"Received /start from User ID: {sender_id} (Configured ADMIN_ID: {ADMIN_ID})")
+
+    # ADMIN_ID သတ်မှတ်ထားပြီး မကိုက်ညီပါက Log တွင် ပြပေးမည်
+    if ADMIN_ID and int(sender_id) != int(ADMIN_ID):
+        await message.reply_text(f"⛔ Unauthorized: Your ID is `{sender_id}`. Please set ADMIN_ID={sender_id} in your environment variables.")
         return
 
     text = (
@@ -60,7 +63,8 @@ async def start_handler(client: Client, message: Message):
 
 @bot.on_callback_query(filters.regex("^server_stats$"))
 async def stats_callback(client: Client, query: CallbackQuery):
-    if ADMIN_ID and query.from_user.id != ADMIN_ID:
+    sender_id = query.from_user.id if query.from_user else 0
+    if ADMIN_ID and int(sender_id) != int(ADMIN_ID):
         await query.answer("⛔ Access Denied", show_alert=True)
         return
 
@@ -80,7 +84,8 @@ async def stats_callback(client: Client, query: CallbackQuery):
 
 @bot.on_callback_query(filters.regex("^manual_sync$"))
 async def manual_sync_callback(client: Client, query: CallbackQuery):
-    if ADMIN_ID and query.from_user.id != ADMIN_ID:
+    sender_id = query.from_user.id if query.from_user else 0
+    if ADMIN_ID and int(sender_id) != int(ADMIN_ID):
         await query.answer("⛔ Access Denied", show_alert=True)
         return
 
@@ -94,7 +99,6 @@ async def manual_sync_callback(client: Client, query: CallbackQuery):
 
 
 async def run_backup_pipeline(status_msg: Message = None, user=None):
-    """FIFO Queue ပုံစံဖြင့် တစ်ကြိမ်လျှင် ဖိုင်တစ်ခုချင်းစီ သန့်ရှင်းစွာ ရွှေ့ပြောင်းခြင်း"""
     if TASK_LOCK.locked():
         logger.info("A backup pipeline is already running. Skipping trigger.")
         return
@@ -110,7 +114,6 @@ async def run_backup_pipeline(status_msg: Message = None, user=None):
                     await status_msg.edit_text("ℹ️ Upload ပြီးစီးသော ဖိုင်အသစ် မရှိသေးပါ။")
                 return
 
-            # မတင်ရသေးသော ဖိုင်များကို ရွေးထုတ်ခြင်း
             pending_files = [f for f in files if f["id"] not in PROCESSED_FILE_IDS]
             if not pending_files:
                 if status_msg:
@@ -120,7 +123,6 @@ async def run_backup_pipeline(status_msg: Message = None, user=None):
             u_name = user.first_name if user else "AutoScheduler"
             u_id = user.id if user else 0
 
-            # Sequential Loop (တစ်ခုပြီးမှ တစ်ခုလုပ်ခြင်း)
             for idx, file_info in enumerate(pending_files, start=1):
                 f_id = file_info["id"]
                 f_name = file_info["name"]
@@ -136,7 +138,6 @@ async def run_backup_pipeline(status_msg: Message = None, user=None):
                         logger.error(f"Could not get direct link for: {f_name}")
                         continue
 
-                    # Download Progress Callback ချိတ်ဆက်ခြင်း
                     async def dl_progress(current, total, speed, elapsed, status):
                         if status_msg:
                             p_text = make_progress_text(
@@ -162,13 +163,11 @@ async def run_backup_pipeline(status_msg: Message = None, user=None):
                         logger.error(f"Download failed for: {f_name}")
                         continue
 
-                    # 1.9GB ထက်ကျော်ပါက 7z ဖြင့် ခွဲထုတ်ခြင်း
                     if status_msg:
                         await status_msg.edit_text(f"✂️ `{f_name}` အား လိုအပ်ပါက အပိုင်းခွဲထုတ်နေပါသည် (7z)...")
 
                     parts, is_split = file_manager.split_file_if_needed(dest_path)
 
-                    # Telegram သို့ Upload တင်ခြင်းနှင့် Master Post ထုတ်ပေးခြင်း
                     user_data = {"name": u_name, "id": u_id}
                     up_success = await uploader.upload_parts_and_post_summary(
                         album_name=f_name,
@@ -184,7 +183,6 @@ async def run_backup_pipeline(status_msg: Message = None, user=None):
                 except Exception as task_err:
                     logger.exception(f"Error during task {f_name}: {task_err}")
                 finally:
-                    # Task ပြီးဆုံးပါက Disk နေရာ ချက်ချင်း ၁၀၀% ပြန်ရှင်းခြင်း
                     file_manager.cleanup_task_dir(task_dir)
 
             if status_msg:
@@ -205,7 +203,6 @@ async def main():
     await bot.start()
     logger.info("Telegram Bot started successfully.")
 
-    # Auto Scan Hours ချိန်ညှိခြင်း (ဥပမာ- 9,21 နာရီ)
     hours = AUTO_SCAN_HOURS.split(",")
     for h in hours:
         if h.strip().isdigit():
@@ -214,11 +211,9 @@ async def main():
     scheduler.start()
     logger.info(f"Scheduler active for hours: {AUTO_SCAN_HOURS}")
 
-    # Process ဆက်လက် Run နေစေရန်
-    try:
-        await asyncio.Event().wait()
-    finally:
-        await bot.stop()
+    # Pyrogram idle() သုံး၍ Signal များကို ချောမွေ့စွာ စောင့်ဆိုင်းစေခြင်း
+    await idle()
+    await bot.stop()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    bot.run(main())
