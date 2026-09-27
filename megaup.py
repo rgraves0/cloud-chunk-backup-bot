@@ -10,7 +10,6 @@ logger = logging.getLogger(__name__)
 
 class MegaUpClient:
     def __init__(self):
-        # YetiShare API v2 endpoint အမှန်
         self.api_base_url = "https://megaup.net/api/v2"
         self.site_url = "https://megaup.net"
         self.keys = [k for k in [MEGAUP_KEY_1, MEGAUP_KEY_2] if k]
@@ -36,61 +35,91 @@ class MegaUpClient:
             "X-Requested-With": "XMLHttpRequest"
         }
         if self.session_cookie:
-            headers["Cookie"] = f"file_manager_session={self.session_cookie}; PHPSESSID={self.session_cookie}"
+            headers["Cookie"] = self.session_cookie
         return headers
 
     async def get_recent_completed_files(self) -> List[Dict]:
-        """Sync folder နှင့် ၎င်းအောက်ရှိ files/folders များကို YetiShare API v2 ဖြင့် ရှာဖွေခြင်း"""
+        """MegaUp API v2 response မှ folder နှင့် file များကို တိကျစွာ ခွဲထုတ်ခြင်း"""
         for _ in range(len(self.keys) or 1):
             async with httpx.AsyncClient(headers=self.get_headers(), timeout=30.0, follow_redirects=True) as client:
                 try:
-                    # နည်းလမ်း ၁ - YetiShare API v2 POST method
                     if self.current_key:
                         logger.info(f"Scanning MegaUp root via API v2 for folder: '{self.folder_name}'...")
                         
-                        # Root listing ရယူခြင်း
-                        payload = {"access_token": self.current_key}
+                        # Payload တွင် access_token ရော api_key ရော ထည့်သွင်းခြင်း
+                        payload = {
+                            "access_token": self.current_key,
+                            "api_key": self.current_key
+                        }
                         res = await client.post(f"{self.api_base_url}/folder/listing", data=payload)
-                        
-                        # POST မရပါက GET ဖြင့် စမ်းသပ်ခြင်း
-                        if res.status_code == 404:
+                        if res.status_code != 200:
                             res = await client.get(f"{self.api_base_url}/folder/listing", params=payload)
 
-                        logger.info(f"API v2 Response: Status {res.status_code}")
-
                         if res.status_code == 200:
-                            json_data = res.json()
-                            data = json_data.get("data") or json_data.get("children") or []
-                            
+                            try:
+                                json_data = res.json()
+                                # Terminal log တွင် JSON ပုံစံ အမှန်ကို ဖတ်ရှုနိုင်ရန် log ထုတ်ခြင်း
+                                logger.info(f"RAW API JSON RESPONSE: {json.dumps(json_data)[:400]}")
+                            except Exception:
+                                json_data = {}
+
+                            # YetiShare API Keys အားလုံးကို ရှာဖွေခြင်း
+                            items = (
+                                json_data.get("data")
+                                or json_data.get("children")
+                                or json_data.get("result")
+                                or json_data.get("files")
+                                or json_data.get("folders")
+                                or []
+                            )
+                            if isinstance(items, dict):
+                                items = items.get("files", []) + items.get("folders", [])
+
                             target_folder_id = None
-                            # Sync folder ကို ရှာဖွေခြင်း
-                            for item in data:
-                                if item.get("folder_name", item.get("name", "")).strip().lower() == self.folder_name.lower():
-                                    target_folder_id = item.get("folder_id", item.get("id"))
+                            for item in items:
+                                name = str(item.get("folder_name") or item.get("name") or "").strip()
+                                if name.lower() == self.folder_name.lower():
+                                    target_folder_id = item.get("folder_id") or item.get("id")
+                                    logger.info(f"Target folder '{self.folder_name}' matched! ID: {target_folder_id}")
                                     break
 
-                            # Sync folder တွေ့ပါက ၎င်းအတွင်းပိုင်းကို ဆက်လက်ခေါ်ယူခြင်း
-                            folder_payload = {"access_token": self.current_key}
-                            if target_folder_id:
-                                folder_payload["parent_folder_id"] = target_folder_id
-                                logger.info(f"Accessing folder '{self.folder_name}' (ID: {target_folder_id})")
-
+                            # Sync Folder ID တွေ့ပါက ၎င်းအောက်ရှိ item များကို ဆက်ဆွဲယူခြင်း
+                            folder_payload = {
+                                "access_token": self.current_key,
+                                "api_key": self.current_key,
+                                "folder_id": target_folder_id or "0",
+                                "parent_folder_id": target_folder_id or "0"
+                            }
                             f_res = await client.post(f"{self.api_base_url}/folder/listing", data=folder_payload)
+                            
+                            valid_files = []
                             if f_res.status_code == 200:
-                                files_data = f_res.json().get("data") or f_res.json().get("children") or []
-                                valid_files = []
-                                
-                                for f in files_data:
-                                    # Subfolder မဟုတ်ဘဲ ဖိုင်ဖြစ်ပါက ထည့်သွင်းခြင်း
-                                    if not f.get("is_folder") and not f.get("is_dir"):
-                                        f_name = f.get("filename") or f.get("name")
+                                try:
+                                    f_json = f_res.json()
+                                    logger.info(f"SYNC FOLDER RAW JSON: {json.dumps(f_json)[:400]}")
+                                    f_items = (
+                                        f_json.get("data")
+                                        or f_json.get("children")
+                                        or f_json.get("result")
+                                        or f_json.get("files")
+                                        or []
+                                    )
+                                    if isinstance(f_items, dict):
+                                        f_items = f_items.get("files", [])
+                                except Exception:
+                                    f_items = []
+
+                                for f in f_items:
+                                    is_dir = f.get("is_folder") or f.get("is_dir") or f.get("type") == "folder"
+                                    if not is_dir:
+                                        f_name = f.get("filename") or f.get("name") or f.get("original_filename")
                                         f_id = f.get("file_id") or f.get("id")
                                         f_url = f.get("url") or f.get("download_url") or f.get("short_url")
                                         f_size = f.get("filesize") or f.get("size") or 0
                                         
                                         if f_name:
                                             valid_files.append({
-                                                "id": str(f_id),
+                                                "id": str(f_id or f_name),
                                                 "name": f_name,
                                                 "album_name": self.folder_name,
                                                 "size": int(f_size),
@@ -101,11 +130,10 @@ class MegaUpClient:
                                     logger.info(f"Found {len(valid_files)} files in '{self.folder_name}' via API v2.")
                                     return valid_files
 
-                    # နည်းလမ်း ၂ - Web Dashboard Fallback (account_home.html)
+                    # Fallback (HTML Account Scraping)
                     logger.info("Using MegaUp dashboard web scraping fallback...")
                     dash_res = await client.get(f"{self.site_url}/account_home.html")
                     if dash_res.status_code == 200:
-                        # megaup.net file links extract လုပ်ခြင်း
                         matches = re.findall(r'href="(https://megaup\.net/([a-zA-Z0-9]+)/([^"]+))"', dash_res.text)
                         if matches:
                             files = []
@@ -117,7 +145,7 @@ class MegaUpClient:
                                     "size": 0,
                                     "download_url": full_url
                                 })
-                            logger.info(f"Found {len(files)} files via web dashboard scraping.")
+                            logger.info(f"Found {len(files)} files via scraping.")
                             return files
 
                 except Exception as e:
@@ -127,31 +155,30 @@ class MegaUpClient:
         return []
 
     async def get_download_stream_url(self, file_info: Dict) -> Optional[str]:
-        """ဖိုင်၏ Direct Download link ကို ရယူခြင်း"""
+        """Direct Download link ရယူခြင်း"""
         file_url = file_info.get("download_url")
         file_id = file_info.get("id")
 
         if not file_url and file_id:
             file_url = f"{self.site_url}/{file_id}"
 
-        # API v2 direct download တောင်းယူခြင်း
         if self.current_key and file_id:
             async with httpx.AsyncClient(headers=self.get_headers(), timeout=30.0, follow_redirects=True) as client:
                 try:
                     payload = {
                         "access_token": self.current_key,
+                        "api_key": self.current_key,
                         "file_id": file_id
                     }
                     res = await client.post(f"{self.api_base_url}/file/download", data=payload)
                     if res.status_code == 200:
                         dl_data = res.json()
-                        dl_link = dl_data.get("download_url") or dl_data.get("url")
+                        dl_link = dl_data.get("download_url") or dl_data.get("url") or dl_data.get("data", {}).get("url")
                         if dl_link:
                             return dl_link
                 except Exception as e:
                     logger.debug(f"API direct download lookup failed: {e}")
 
-        # Page download parser
         if file_url:
             async with httpx.AsyncClient(headers=self.get_headers(), timeout=30.0, follow_redirects=True) as client:
                 try:
