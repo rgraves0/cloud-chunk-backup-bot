@@ -6,7 +6,6 @@ from pathlib import Path
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-import httpx
 
 from config import API_ID, API_HASH, BOT_TOKEN, ADMIN_ID, AUTO_SCAN_HOURS, TARGET_CHANNEL_ID
 from megaup import MegaUpClient
@@ -43,11 +42,14 @@ def get_control_keyboard():
     ])
 
 
-@bot.on_message(filters.private)
+@bot.on_message()
 async def incoming_message_handler(client: Client, message: Message):
+    if not message.text:
+        return
+        
     sender_id = message.from_user.id if message.from_user else 0
-    text = message.text or ""
-    logger.info(f"Incoming message from: {sender_id} | Text: '{text}'")
+    text = message.text.strip()
+    logger.info(f"Incoming message from {sender_id}: '{text}'")
 
     if text.startswith("/start"):
         if ADMIN_ID and int(sender_id) != int(ADMIN_ID):
@@ -64,7 +66,6 @@ async def incoming_message_handler(client: Client, message: Message):
         await message.reply_text(welcome_text, reply_markup=get_control_keyboard())
 
 
-# Global Callback Handler: Filter မခံဘဲ တိုက်ရိုက်ဖမ်းယူ စစ်ဆေးခြင်း
 @bot.on_callback_query()
 async def incoming_callback_handler(client: Client, query: CallbackQuery):
     sender_id = query.from_user.id if query.from_user else 0
@@ -203,33 +204,10 @@ async def scheduled_scan_job():
     await run_backup_pipeline()
 
 
-async def clear_telegram_webhook():
-    try:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=True"
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            res = await client.get(url)
-            logger.info(f"Webhook reset status: {res.json()}")
-    except Exception as e:
-        logger.warning(f"Failed to reset webhook: {e}")
-
-
 async def main():
-    await clear_telegram_webhook()
-
     async with bot:
         me = await bot.get_me()
         logger.info(f"Bot connected: @{me.username} (ID: {me.id})")
-
-        if ADMIN_ID:
-            try:
-                await bot.send_message(
-                    chat_id=ADMIN_ID,
-                    text="🟢 **Bot Online!**\n\nစနစ် စတင်လည်ပတ်နေပါပြီ။",
-                    reply_markup=get_control_keyboard()
-                )
-                logger.info("Startup alert message successfully delivered to Admin.")
-            except Exception as e:
-                logger.error(f"Failed to deliver message to ADMIN_ID {ADMIN_ID}: {e}")
 
         hours = AUTO_SCAN_HOURS.split(",")
         for h in hours:
@@ -238,6 +216,7 @@ async def main():
 
         scheduler.start()
         logger.info(f"Scheduler active for hours: {AUTO_SCAN_HOURS}")
+        logger.info("Ready to receive messages and callbacks.")
 
         await idle()
 
