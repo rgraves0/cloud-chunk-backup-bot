@@ -12,7 +12,6 @@ class MegaUpClient:
         self.base_url = base_url.rstrip("/")
         self.keys = [k for k in [MEGAUP_KEY_1, MEGAUP_KEY_2] if k]
         self.current_key_index = 0
-        # S အကြီးဖြင့် Sync သတ်မှတ်ခြင်း သို့မဟုတ် .env တန်ဖိုးကို ယူခြင်း
         self.folder_name = MEGAUP_FOLDER_NAME or "Sync"
         self.session_cookie = os.getenv("MEGAUP_COOKIE", "")
 
@@ -23,7 +22,6 @@ class MegaUpClient:
         return self.keys[self.current_key_index]
 
     def switch_key(self):
-        """Key 1 မှ Key 2 သို့ (သို့မဟုတ် ပြောင်းပြန်) လဲလှယ်ခြင်း"""
         if len(self.keys) > 1:
             self.current_key_index = (self.current_key_index + 1) % len(self.keys)
             logger.info(f"Switched to API Key {self.current_key_index + 1}")
@@ -39,64 +37,68 @@ class MegaUpClient:
         return headers
 
     async def get_recent_completed_files(self) -> List[Dict]:
-        """Sync folder နှင့် ၎င်းအောက်ရှိ Subfolder/Album များထဲမှ ဖိုင်များကို ရှာဖွေထုတ်ယူခြင်း"""
+        """Sync folder နှင့် ၎င်းအောက်ရှိ Subfolder/Direct files အားလုံးကို ရှာဖွေဖတ်ယူခြင်း"""
         for _ in range(len(self.keys) or 1):
             async with httpx.AsyncClient(headers=self.get_headers(), timeout=30.0, follow_redirects=True) as client:
                 try:
                     if self.current_key:
-                        # 1. ပထမဆုံး Folder အမည် (Sync) ဖြင့် စစ်ဆေးခြင်း
-                        params = {"folder": self.folder_name}
-                        res = await client.get(f"{self.base_url}/files", params=params)
-                        logger.info(f"Checking MegaUp API for folder '{self.folder_name}' | Status: {res.status_code}")
-
+                        # ၁။ ပထမဆုံး အကောင့်ထဲရှိ ဖိုင်/ဖိုဒါအားလုံးကို ဆွဲယူပြီး Sync folder ID ကို ရှာဖွေခြင်း
+                        res = await client.get(f"{self.base_url}/files")
+                        target_folder_id = None
+                        
                         if res.status_code == 200:
-                            json_res = res.json()
-                            raw_items = json_res.get("data") or json_res.get("files") or json_res.get("result") or []
-                            
+                            data = res.json().get("data") or res.json().get("files") or res.json().get("result") or []
+                            for item in data:
+                                if (item.get("is_dir") or item.get("type") == "folder") and item.get("name", "").strip().lower() == self.folder_name.lower():
+                                    target_folder_id = item.get("id")
+                                    logger.info(f"Matched '{self.folder_name}' Folder ID: {target_folder_id}")
+                                    break
+
+                        # ၂။ Folder ID ဖြင့် ဖိုင်စာရင်း တောင်းယူခြင်း (မတွေ့ပါက folder parameter ဖြင့် စမ်းသပ်ခြင်း)
+                        params = {"folder_id": target_folder_id} if target_folder_id else {"folder": self.folder_name}
+                        f_res = await client.get(f"{self.base_url}/files", params=params)
+                        
+                        if f_res.status_code == 200:
+                            f_data = f_res.json().get("data") or f_res.json().get("files") or f_res.json().get("result") or []
                             valid_files = []
-                            for item in raw_items:
-                                # Subfolder ဖြစ်ပါက ထို Subfolder (Album) အောက်သို့ ဆက်လက်ဝင်ရောက်ရှာဖွေခြင်း
+
+                            for item in f_data:
+                                # Subfolder တွေ့ပါက အတွင်းသို့ ဆက်လက်ဝင်ရောက်ရှာဖွေခြင်း
                                 if item.get("is_dir") or item.get("type") == "folder":
-                                    sub_folder_id = item.get("id")
-                                    sub_folder_name = item.get("name")
-                                    logger.info(f"Found Album Folder: {sub_folder_name} (ID: {sub_folder_id}). Scanning contents...")
-                                    
-                                    sub_res = await client.get(f"{self.base_url}/files", params={"folder_id": sub_folder_id})
+                                    sub_id = item.get("id")
+                                    sub_name = item.get("name")
+                                    sub_res = await client.get(f"{self.base_url}/files", params={"folder_id": sub_id})
                                     if sub_res.status_code == 200:
-                                        sub_items = sub_res.json().get("data") or sub_res.json().get("files") or []
-                                        for s_item in sub_items:
-                                            f_status = str(s_item.get("status", "")).lower()
-                                            f_size = s_item.get("size", 0)
-                                            if f_status in ("completed", "ready", "active", "") and int(f_size) > 0:
+                                        sub_data = sub_res.json().get("data") or sub_res.json().get("files") or []
+                                        for s in sub_data:
+                                            if not s.get("is_dir") and s.get("type") != "folder":
                                                 valid_files.append({
-                                                    "id": str(s_item.get("id")),
-                                                    "name": s_item.get("name"),
-                                                    "album_name": sub_folder_name, # Album အမည်တွဲယူခြင်း
-                                                    "size": int(f_size),
-                                                    "download_url": s_item.get("download_url")
+                                                    "id": str(s.get("id")),
+                                                    "name": s.get("name"),
+                                                    "album_name": sub_name,
+                                                    "size": int(s.get("size", 0)),
+                                                    "download_url": s.get("download_url")
                                                 })
                                     continue
 
-                                # Sync folder ထဲတွင် တိုက်ရိုက်ရှိနေသော ဖိုင်များ
-                                status = str(item.get("status", "")).lower()
-                                size = item.get("size", 0)
-                                if status in ("completed", "ready", "active", "") and int(size) > 0:
-                                    valid_files.append({
-                                        "id": str(item.get("id")),
-                                        "name": item.get("name"),
-                                        "album_name": self.folder_name,
-                                        "size": int(size),
-                                        "download_url": item.get("download_url")
-                                    })
-                            
-                            logger.info(f"Total valid files found to sync: {len(valid_files)}")
-                            return valid_files
+                                # Sync folder ထဲရှိ Direct ဖိုင်များ (ဥပမာ- .zip, .flac)
+                                valid_files.append({
+                                    "id": str(item.get("id")),
+                                    "name": item.get("name"),
+                                    "album_name": self.folder_name,
+                                    "size": int(item.get("size", 0)),
+                                    "download_url": item.get("download_url")
+                                })
 
-                        elif res.status_code in (401, 429):
+                            if valid_files:
+                                logger.info(f"Successfully discovered {len(valid_files)} files in '{self.folder_name}'.")
+                                return valid_files
+
+                        elif f_res.status_code in (401, 429):
                             self.switch_key()
                             continue
 
-                    # Fallback (User Dashboard Parsing)
+                    # Fallback (User Dashboard Web Scraping)
                     logger.info("Using MegaUp dashboard fallback parser...")
                     res = await client.get("https://megaup.net/user/files")
                     if res.status_code == 200:
