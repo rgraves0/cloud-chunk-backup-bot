@@ -5,7 +5,6 @@ import logging
 from pathlib import Path
 from pyrogram import Client, filters, idle
 from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.raw.functions.messages import DeleteHistory
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import httpx
 
@@ -44,7 +43,7 @@ def get_control_keyboard():
     ])
 
 
-@bot.on_message()
+@bot.on_message(filters.private)
 async def incoming_message_handler(client: Client, message: Message):
     sender_id = message.from_user.id if message.from_user else 0
     text = message.text or ""
@@ -65,41 +64,42 @@ async def incoming_message_handler(client: Client, message: Message):
         await message.reply_text(welcome_text, reply_markup=get_control_keyboard())
 
 
-@bot.on_callback_query(filters.regex("^server_stats$"))
-async def stats_callback(client: Client, query: CallbackQuery):
+# Global Callback Handler: Filter မခံဘဲ တိုက်ရိုက်ဖမ်းယူ စစ်ဆေးခြင်း
+@bot.on_callback_query()
+async def incoming_callback_handler(client: Client, query: CallbackQuery):
     sender_id = query.from_user.id if query.from_user else 0
+    data = query.data or ""
+    logger.info(f"Button Clicked: '{data}' by User ID: {sender_id}")
+
     if ADMIN_ID and int(sender_id) != int(ADMIN_ID):
-        await query.answer("⛔ Access Denied", show_alert=True)
+        await query.answer("⛔ Access Denied: Unauthorized User", show_alert=True)
         return
 
-    stats_text = make_progress_text(
-        file_name="System Idle",
-        user_name=query.from_user.first_name,
-        user_id=query.from_user.id,
-        current=0,
-        total=1,
-        speed=0,
-        elapsed=0,
-        status="Idle / Monitoring"
-    )
-    await query.message.edit_text(stats_text, reply_markup=get_control_keyboard())
-    await query.answer()
+    if data == "server_stats":
+        await query.answer("📊 Fetching server stats...")
+        stats_text = make_progress_text(
+            file_name="System Idle",
+            user_name=query.from_user.first_name,
+            user_id=query.from_user.id,
+            current=0,
+            total=1,
+            speed=0,
+            elapsed=0,
+            status="Idle / Monitoring"
+        )
+        try:
+            await query.message.edit_text(stats_text, reply_markup=get_control_keyboard())
+        except Exception as edit_err:
+            logger.debug(f"Edit error on stats: {edit_err}")
 
+    elif data == "manual_sync":
+        if TASK_LOCK.locked():
+            await query.answer("⚠️ Task တစ်ခု လုပ်ဆောင်နေဆဲဖြစ်ပါသည်။ ခေတ္တစောင့်ပါ။", show_alert=True)
+            return
 
-@bot.on_callback_query(filters.regex("^manual_sync$"))
-async def manual_sync_callback(client: Client, query: CallbackQuery):
-    sender_id = query.from_user.id if query.from_user else 0
-    if ADMIN_ID and int(sender_id) != int(ADMIN_ID):
-        await query.answer("⛔ Access Denied", show_alert=True)
-        return
-
-    if TASK_LOCK.locked():
-        await query.answer("⚠️ Task တစ်ခု လုပ်ဆောင်နေဆဲဖြစ်ပါသည်။ ခေတ္တစောင့်ပါ။", show_alert=True)
-        return
-
-    await query.answer("🚀 Sync စတင်နေပါပြီ...")
-    status_msg = await query.message.reply_text("🔍 MegaUp မှ ဖိုင်များကို စစ်ဆေးနေပါသည်...")
-    asyncio.create_task(run_backup_pipeline(status_msg, query.from_user))
+        await query.answer("🚀 Sync စတင်နေပါပြီ...")
+        status_msg = await query.message.reply_text("🔍 MegaUp မှ ဖိုင်များကို စစ်ဆေးနေပါသည်...")
+        asyncio.create_task(run_backup_pipeline(status_msg, query.from_user))
 
 
 async def run_backup_pipeline(status_msg: Message = None, user=None):
@@ -204,7 +204,6 @@ async def scheduled_scan_job():
 
 
 async def clear_telegram_webhook():
-    """Bot Token ပေါ်ရှိ ညိနေသော Webhook များကို အလိုအလျောက် ရှင်းထုတ်ခြင်း"""
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=True"
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -221,12 +220,11 @@ async def main():
         me = await bot.get_me()
         logger.info(f"Bot connected: @{me.username} (ID: {me.id})")
 
-        # Admin ထံသို့ စတင်နှိုးဆော်လွှာ တိုက်ရိုက်ပို့ခြင်း
         if ADMIN_ID:
             try:
                 await bot.send_message(
                     chat_id=ADMIN_ID,
-                    text="🟢 **Bot Online!**\n\nစနစ် စတင်လည်ပတ်နေပါပြီ။ `/start` မက်ဆေ့ခ်ျ ပေးပို့နိုင်ပါပြီ။",
+                    text="🟢 **Bot Online!**\n\nစနစ် စတင်လည်ပတ်နေပါပြီ။",
                     reply_markup=get_control_keyboard()
                 )
                 logger.info("Startup alert message successfully delivered to Admin.")
