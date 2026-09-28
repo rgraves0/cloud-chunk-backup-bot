@@ -64,6 +64,7 @@ class MegaUpClient:
         data = {
             "access_token": self.current_key,
             "api_key": self.current_key,
+            "account_id": self.account_id,
         }
         if extra_data:
             data.update(extra_data)
